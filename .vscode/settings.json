@@ -1,0 +1,9 @@
+{
+  "clangd.arguments": [
+    "--background-index",
+    "--clang-tidy",
+    "--completion-style=detailed"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "editor.formatOnSave": true
+}

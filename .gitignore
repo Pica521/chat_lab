@@ -1,0 +1,8 @@
+build*/
+*.o
+*.obj
+*.log
+*.swp
+*.swo
+.DS_Store
+compile_commands.json
