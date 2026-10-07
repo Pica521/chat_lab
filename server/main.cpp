@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <cstdlib>
+#include <vector>
 
 namespace{
 
@@ -40,6 +41,275 @@ namespace{
     // 按用户名查找
     std::map<std::string, std::shared_ptr<ClientInfo>> g_clients_by_name;
 
+    // 安全读取 JSON 字符串
+    bool get_string_field(const nlohmann::json& payload, 
+                          const std::string& key, 
+                          std::string& out){
+        // 检查 payload 是否为 JSON 对象
+        if (!payload.is_object()) {
+            return false;
+        }     
+        // 检查字段是否存在           
+        if (!payload.contains(key)) {
+            return false;
+        }    
+        // 检查字段是否为字符串
+        if (!payload[key].is_string()) {
+            return false;
+        }
+        out = payload[key].get<std::string>();
+        return true;
+    }
+
+    // 给客户端带锁发送
+    bool send_to_client(const std::shared_ptr<ClientInfo>& client, 
+                        const chatlab::Message& msg){
+        // 空指针检查
+        if (!client) {
+            return false;
+        }
+        // fd 有效性检查
+        if (client->fd < 0) {
+            return false;
+        }
+        // 加 send_mutex
+        std::lock_guard<std::mutex> lock(client->send_mutex);
+        // 调用 send_message
+        return chatlab::send_message(client->fd, msg);
+    }
+
+    // 发送错误消息
+    void send_error(const std::shared_ptr<ClientInfo>& client, 
+                    int code, const std::string& message){
+        chatlab::Message msg = chatlab::make_error(code, message);
+        send_to_client(client, msg);
+    }
+
+    // 处理登录
+    void handle_login(const std::shared_ptr<ClientInfo>& client, 
+                      const chatlab::Message& msg){
+        // 1.若已登录，拒绝重复登陆
+        if (client->logged_in) {
+            send_error(client, chatlab::ERR_USERNAME_INVALID, "already logged in");
+            return;
+        }
+
+        // 2.读取 username
+        std::string username;
+        if (!get_string_field(msg.payload, "username", username)) {
+            send_error(client, chatlab::ERR_FORMAT_ERROR, "missing or invalid username field");
+            return;
+        }
+
+        // 3.检查用户名合法性
+        constexpr std::size_t MAX_USERNAME_LENGTH = 32;
+        if (username.empty()) {
+            send_error(client, chatlab::ERR_USERNAME_INVALID, "username cannot be empty");
+            return;
+        }
+        if (username.size() > MAX_USERNAME_LENGTH) {
+            send_error(client, chatlab::ERR_USERNAME_INVALID, "username too long (max 32)");
+            return;
+        }
+
+        // 4.加锁，查重，注册
+        bool name_taken = false;
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            if (g_clients_by_name.count(username) > 0) {
+                name_taken = true;
+            } else {
+                client->username = username;
+                client->logged_in = true;
+                g_clients_by_name[username] = client;
+            }
+        } // 锁外回复
+        if (name_taken) {
+            send_error(client, chatlab::ERR_USERNAME_EXISTS, "username already taken");
+            return;
+        }
+
+        // 5.登录成功
+        chatlab::Message resp;
+        resp.type = chatlab::MSG_LOGIN_RESP;
+        resp.payload["ok"] = true;
+        resp.payload["reason"] = "welcome";
+        send_to_client(client, resp);
+        
+        // 6.广播其他用户
+        // 持锁收集在线客户端
+        std::vector<std::shared_ptr<ClientInfo>> others;
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            for(auto& [name, info] : g_clients_by_name) {
+                if (info->fd != client->fd) { // 排除自己
+                    others.push_back(info);
+                }
+            }
+        } // 锁外发送
+        chatlab::Message notice;
+        notice.type = chatlab::MSG_SYSTEM;
+        notice.payload["content"] = username + " has joined";
+        for (auto& info : others) {
+            send_to_client(info, notice);
+        }
+    }
+
+    // 处理在线列表请求
+    void handle_list(const std::shared_ptr<ClientInfo>& client,
+                     const chatlab::Message& msg) {
+        (void)msg;
+        // 1.拒绝未登录请求
+        if (!client->logged_in) {
+            send_error(client, chatlab::ERR_NOT_LOGGED_IN, "not logged in");
+            return;
+        }
+
+        // 2.持锁收集已登录用户名
+        std::vector<std::string> users;
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            for (const auto& [name, info] : g_clients_by_name) {
+                users.push_back(name);
+            }
+        }
+
+        // 3.回复消息
+        chatlab::Message resp;
+        resp.type = chatlab::MSG_LIST_RESP;
+        resp.payload["users"] = users;
+        send_to_client(client, resp);
+    }
+
+    // 处理群发
+    void handle_broadcast(const std::shared_ptr<ClientInfo>& client,
+                          const chatlab::Message& msg) {
+        // 1.拒绝未登录请求
+        if (!client->logged_in) {
+            send_error(client, chatlab::ERR_NOT_LOGGED_IN, "not logged in");
+            return;
+        }
+        
+        // 2.读取 content
+        std::string content;
+        if (!get_string_field(msg.payload, "content", content)) {
+            send_error(client, chatlab::ERR_FORMAT_ERROR, "missing or invalid content field");
+            return;
+        }
+        
+        // 3.检查 content
+        if (content.size() > chatlab::MAX_CHAT_CONTENT_LENGTH) {
+            send_error(client, chatlab::ERR_MESSAGE_TOO_LONG, "content too long");
+            return;
+        }
+        
+        // 4.持锁收集，遍历发送
+        chatlab::Message bcast;
+        bcast.type = chatlab::MSG_BROADCAST_RECV;
+        bcast.payload["from"] = client->username;
+        bcast.payload["content"] = content;
+        std::vector<std::shared_ptr<ClientInfo>> targets;
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            for (auto [name,info] : g_clients_by_name) {
+                targets.push_back(info);
+            }
+        }
+        for (auto& target : targets) {
+            send_to_client(target, bcast);
+        }
+    }
+
+    // 处理私发
+    void handle_private(const std::shared_ptr<ClientInfo>& client,
+                        const chatlab::Message& msg) {
+        // 1.拒绝未登录请求
+        if (!client->logged_in) {
+            send_error(client, chatlab::ERR_NOT_LOGGED_IN, "not logged in");
+            return;
+        }
+        
+        // 2.读取目标和内容
+        std::string to;
+        if (!get_string_field(msg.payload, "to", to)) {
+            send_error(client, chatlab::ERR_FORMAT_ERROR, "missing or invalid to field");
+            return;
+        }
+        std::string content;
+        if (!get_string_field(msg.payload, "content", content)) {
+            send_error(client, chatlab::ERR_FORMAT_ERROR, "missing or invalid content field");
+            return;
+        }
+        
+        // 3.检查 content
+        if (content.size() > chatlab::MAX_CHAT_CONTENT_LENGTH) {
+            send_error(client, chatlab::ERR_MESSAGE_TOO_LONG, "content too long");
+            return;
+        }
+        
+        // 4.持锁查找目标
+        std::shared_ptr<ClientInfo> target;
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            auto it = g_clients_by_name.find(to);
+            if (it != g_clients_by_name.end()) {
+                target = it->second;
+            }
+        }  // 目标不存在
+        if (!target) {
+            send_error(client, chatlab::ERR_USER_NOT_ONLINE, "user not online: " + to);
+            return;
+        }
+        
+        // 5.发送消息
+        chatlab::Message priv;
+        priv.type = chatlab::MSG_PRIVATE_RECV;
+        priv.payload["from"] = client->username;
+        priv.payload["content"] = content;
+        send_to_client(target, priv);
+    }
+
+    // 处理登出
+    void handle_logout(const std::shared_ptr<ClientInfo>& client, 
+                       const chatlab::Message& msg) {
+        (void)msg;
+        // 1.拒绝未登录请求
+        if (!client->logged_in) {
+            send_error(client, chatlab::ERR_NOT_LOGGED_IN, "not logged in");
+            return;
+        }
+
+        // 2.加锁移除
+        std::string leaving_name = client->username;  // 用于广播
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            g_clients_by_name.erase(client->username);
+            client->username.clear();
+            client->logged_in = false;
+        }
+
+        // 3.回复自己
+        chatlab::Message bye;
+        bye.type = chatlab::MSG_SYSTEM;
+        bye.payload["content"] = "bye";
+        send_to_client(client, bye);
+        
+        // 4.广播其他用户
+        std::vector<std::shared_ptr<ClientInfo>> others;
+        {
+            std::lock_guard<std::mutex> lock(g_clients_mutex);
+            for (auto& [name, info] : g_clients_by_name) {
+                others.push_back(info);
+            }
+        }
+        chatlab::Message notice;
+        notice.type = chatlab::MSG_SYSTEM;
+        notice.payload["content"] = leaving_name + " has left";
+        for (auto& info : others) {
+            send_to_client(info, notice);
+        }
+    }
+
     // 创建 socket，绑定端口，开启监听
     int create_listen_socket(int port) {
         // 1.创建 socket
@@ -50,7 +320,7 @@ namespace{
         }
         chatlab::FdGuard guard(fd);
 
-        // 设置 SO_REUSEADDR
+        // 2.设置 SO_REUSEADDR
         int opt =1;
         if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
             std::cerr << "set sockopt failed: " << std::strerror(errno) << std::endl;
@@ -100,18 +370,35 @@ namespace{
                 chatlab::ReadResult result = chatlab::read_message(fd, msg);
                 // 成功收到消息
                 if (result == chatlab::ReadResult::Ok) {
-                    // 打印消息
-                    std::cout << "[fd=" << fd << "]" 
-                              << "type=" << static_cast<int>(msg.type) 
-                              << " payload=" << msg.payload.dump() << std::endl;
+                    // 根据消息类型处理
+                    switch (msg.type) {
+                        case chatlab::MSG_LOGIN:
+                            handle_login(client, msg);
+                            break;
+                        case chatlab::MSG_LIST:
+                            handle_list(client, msg);
+                            break;
+                        case chatlab::MSG_BROADCAST:
+                            handle_broadcast(client, msg);
+                            break;
+                        case chatlab::MSG_PRIVATE:
+                            handle_private(client, msg);
+                            break;
+                        case chatlab::MSG_LOGOUT:
+                            handle_logout(client, msg);
+                            break;
+                        default:
+                            send_error(client, chatlab::ERR_UNKNOWN_TYPE, "unknown message type");
+                            break;
+                    }
                     continue;
                 }
                 // 失败
-                if (result == chatlab::ReadResult::Closed) {
+                if (result == chatlab::ReadResult::Closed) {  // 对端关闭
                     std::cout << "[fd=" << fd << "] closed by peer" << std::endl;
                     break;
                 }
-                if (result == chatlab::ReadResult::ProtocolError) {
+                if (result == chatlab::ReadResult::ProtocolError) {  // 协议错误
                     std::cerr << "[fd=" << fd << "] protocol error" << std::endl;
                     break;
                 }
@@ -130,7 +417,7 @@ namespace{
                 g_clients_by_fd.erase(fd);
             }
             ::close(fd);
-            std::cout << "[fd=" << fd << "] conection cleaned up" << std::endl;
+            std::cout << "[fd=" << fd << "] connection cleaned up" << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "[fd=" << fd << "] exception: " << e.what() << std::endl;
         } catch (...) {
