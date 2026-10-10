@@ -407,16 +407,40 @@ namespace{
             }
 
             // 3.断开清理
+            std::string leaving_name;    // 用于系统广播通知
+            bool was_logged_in = false;  // 判断 \quit 还是 docker kill
             {
                 std::lock_guard<std::mutex> lock(g_clients_mutex);
                 // 若已登录，从用户名索引中删除
                 if (client->logged_in) {
+                    leaving_name = client->username;
+                    was_logged_in = true;
                     g_clients_by_name.erase(client->username);
+                    client->logged_in = false;
+                    client->username.clear();
                 }
                 // 从 fd 索引中删除
                 g_clients_by_fd.erase(fd);
             }
             ::close(fd);
+            // docker kill
+            if (was_logged_in) {
+                // 持锁收集在线用户
+                std::vector<std::shared_ptr<ClientInfo>> others;
+                {
+                    std::lock_guard<std::mutex> lock(g_clients_mutex);
+                    for (auto& [name, info] : g_clients_by_name) {
+                        others.push_back(info);
+                    }                
+                }
+                // 锁外发送
+                chatlab::Message notice;
+                notice.type = chatlab::MSG_SYSTEM;
+                notice.payload["content"] = leaving_name + " has left";
+                for (auto& info : others) {
+                    send_to_client(info, notice);
+                }
+            }
             std::cout << "[fd=" << fd << "] connection cleaned up" << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "[fd=" << fd << "] exception: " << e.what() << std::endl;

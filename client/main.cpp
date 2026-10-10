@@ -319,7 +319,7 @@ namespace {
             return false;
         }
         // 未知类型
-        print_line("Unknown command. Try /list, /broadcast, /msg.");
+        print_line("Unknown command. Try /list, /broadcast, /msg, /quit.");
         return true;
     }
 
