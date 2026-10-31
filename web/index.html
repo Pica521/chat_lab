@@ -4,34 +4,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Chat Lab 网页版</title>
-    <style>
-        /* 简单装饰一下 */
-        body {
-            font-family: sans-serif;
-            background-color: #f0f2f5;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-        }
-
-        .container {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-            text-align: center;
-        }
-    </style>
+    <title>Chat Lab 网页版 - 登录</title>
+    <!-- 引用外部 CSS -->
+    <link rel="stylesheet" href="/style.css">
 </head>
 
 <body>
     <div class="container">
-        <h1>Hello, Web Chat!</h1>
-        <p>如果你在浏览器里看到了这句话，说明 C++ 服务端已经成功返回了 HTML。</p>
+        <h2>欢迎来到 Chat Lab</h2>
+        <input type="text" id="username" placeholder="请输入用户名" autocomplete="off">
+        <input type="password" id="password" placeholder="请输入密码">
+        <div class="'btn-group">
+            <button id="btn-login">登录</button>
+            <button id="btn-register">注册</button>
+        </div>
+        <div id="message"></div>
     </div>
+    <!-- 引用外部 JS -->
+    <script src="/app.js"></script>
 </body>
 
 </html>

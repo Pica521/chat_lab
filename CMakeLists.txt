@@ -49,7 +49,10 @@ target_link_libraries(chat_server PRIVATE chat_core)
 add_executable(chat_client client/main.cpp)
 target_link_libraries(chat_client PRIVATE chat_core)
 
-add_executable(http_server server/http_main.cpp)
+add_executable(http_server 
+  server/http_main.cpp
+  server/http.cpp
+  server/api.cpp)
 target_link_libraries(http_server PRIVATE chat_core)
 
 enable_testing()

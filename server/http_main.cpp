@@ -1,61 +1,14 @@
 #include <iostream>
 #include <string>
-#include <fstream>
-#include <sstream>
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "common/net.h"
+#include "server/http.h"
 
 constexpr int PORT = 8080;
-
-// 读取本地文件内容到字符串
-std::string read_file(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return "";  // 文件不存在
-    }
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
-}
-
-// (暂时)处理单个 HTTP 连接
-void handle_http_client(int client_fd) {
-    // 1. 接收浏览器发来的请求
-    char buffer[4096] = {0};
-    ssize_t bytes_read = ::recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes_read > 0) {
-        std::string request(buffer, bytes_read);
-        // 2. 检查请求行
-        if (request.find("GET / ") == 0 || request.find("GET /index.html") == 0) {
-            // 读入 HTML
-            std::string html = read_file("web/index.html");
-            // 3. 写响应
-            if (!html.empty()) { //成功
-                std::string response = "HTTP/1.1 200 OK\r\n";
-                response += "Content-Type: text/html; charset=utf-8\r\n";
-                response += "Content-Length: " + std::to_string(html.size()) + "\r\n";
-                response += "Connection: close\r\n";
-                response += "\r\n";
-                response += html;
-                // 发回浏览器
-                chatlab::send_all(client_fd, response.data(), response.size());
-            }
-        } else { // 其他路径(暂时)404
-                std::string not_found = "HTTP/1.1 404 Not Found\r\n"
-                                        "Content-Length: 9\r\n"
-                                        "Connection: close\r\n\r\n"
-                                        "Not Found";
-                chatlab::send_all(client_fd, not_found.data(), not_found.size());
-            }
-    }
-    // 5. 关闭客户端连接
-    ::close(client_fd);
-}
-
 
 int main(){
     // 1. 创建监听 socket
